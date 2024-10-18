@@ -1,0 +1,7 @@
+MONGODB_URI="Your_url"
+
+GOOGLE_API_KEY="Your_url"
+
+SPREADSHEET_ID="sheet url"
+
+JWT_SECRET=demo

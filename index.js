@@ -6,6 +6,7 @@ const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const asyncHandler = require("express-async-handler");
+const XLSX = require("xlsx"); // Import xlsx package
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// MongoDB connection
 mongoose
   .connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
@@ -27,45 +29,27 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true },
 });
 
+// Hash password before saving
 UserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
 
+// Compare passwords
 UserSchema.methods.comparePassword = function (password) {
   return bcrypt.compare(password, this.password);
 };
 
 const User = mongoose.model("User", UserSchema);
 
-// Employee model
-const EmployeeSchema = new mongoose.Schema({
-  employeeId: String,
-  name: String,
-  role: String,
-  employmentType: String,
-  status: String,
-  checkIn: String,
-  checkOut: String,
-  workType: String,
-});
-
-const Employee = mongoose.model("Employee", EmployeeSchema);
-
 // Middleware to authenticate JWT
 function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization;
 
-  console.log(authHeader);
-
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
-    console.log(token);
-
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-      console.log(token);
-
       if (err) return res.sendStatus(403); // Forbidden
 
       req.user = user; // Attach user info to request
@@ -75,6 +59,61 @@ function authenticateJWT(req, res, next) {
     res.sendStatus(401); // Unauthorized
   }
 }
+
+// Function to read data from a local Excel file and store it in MongoDB
+app.post("/api/read-excel", authenticateJWT, asyncHandler(async (req, res) => {
+    const filePath = req.body.filePath; // Get the file path from the request body
+
+    try {
+        // Read the Excel file
+        const workbook = XLSX.readFile(filePath);
+        const sheetName = workbook.SheetNames[0]; // Get the first sheet name
+        const sheetData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]); // Convert sheet to JSON
+
+        // Store data in MongoDB
+        await Employee.insertMany(sheetData); // Save data to Employee collection
+
+        res.status(200).json(sheetData); // Send back the data as response
+    } catch (error) {
+        console.error('Error reading Excel file:', error);
+        res.status(500).send('Error reading Excel file');
+    }
+}));
+
+// Function to write new data to a local Excel file without deleting existing data
+app.post("/api/write-excel", authenticateJWT, asyncHandler(async (req, res) => {
+    const { filePath, employeeData } = req.body; // Get the file path and employee data from the request body
+
+    try {
+        let existingData = [];
+
+        // Check if the file exists and read existing data
+        try {
+            const workbook = XLSX.readFile(filePath);
+            const sheetName = workbook.SheetNames[0]; // Get the first sheet name
+            existingData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]); // Convert sheet to JSON
+        } catch (error) {
+            console.log('No existing Excel file found. Creating a new one.');
+        }
+
+        // Combine existing and new employee data
+        const combinedData = [...existingData, ...employeeData];
+
+        // Create a new workbook and worksheet with combined data
+        const newWorkbook = XLSX.utils.book_new();
+        const newWorksheet = XLSX.utils.json_to_sheet(combinedData); // Convert combined JSON to worksheet
+
+        XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, "Employees"); // Append worksheet to workbook
+
+        // Write to the specified Excel file
+        XLSX.writeFile(newWorkbook, filePath);
+
+        res.status(201).send("Data written to Excel file successfully.");
+    } catch (error) {
+        console.error('Error writing to Excel file:', error);
+        res.status(500).send('Error writing to Excel file');
+    }
+}));
 
 // User registration route
 app.post(
@@ -107,93 +146,12 @@ app.post(
       return res.status(401).send("Invalid credentials.");
     }
 
+    // Generate JWT token for authenticated user
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
 
     res.json({ token });
-  })
-);
-
-app.get(
-  "/api/employees",
-  authenticateJWT,
-  asyncHandler(async (req, res) => {
-    const { google } = require("googleapis");
-    const sheets = google.sheets({
-      version: "v4",
-      auth: process.env.GOOGLE_API_KEY,
-    });
-
-    try {
-      const response = await sheets.spreadsheets.values.get({
-        spreadsheetId: process.env.SPREADSHEET_ID,
-        range: "Sheet1!A2:H",
-      });
-      const rows = response.data.values;
-
-      if (rows.length) {
-        // Prepare an array to hold employee documents
-        const employees = rows.map((row) => ({
-          employeeId: row[0],
-          name: row[1],
-          role: row[2],
-          employmentType: row[3],
-          status: row[4],
-          checkIn: row[5],
-          checkOut: row[6],
-          workType: row[7],
-        }));
-
-        // Store each employee document in MongoDB
-        await Employee.insertMany(employees); // Use insertMany for bulk insert
-
-        res.json(employees); // Send back the employees as a response
-      } else {
-        res.status(404).send("No data found.");
-      }
-    } catch (error) {
-      console.error(error); // Log the error for debugging
-      res.status(500).send(error.message);
-    }
-  })
-);
-
-// Post user data to Google Sheets
-app.post(
-  "/api/employees",
-  authenticateJWT,
-  asyncHandler(async (req, res) => {
-    const { google } = require("googleapis");
-    const sheets = google.sheets({
-      version: "v4",
-      auth: process.env.GOOGLE_API_KEY,
-    });
-
-    try {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: process.env.SPREADSHEET_ID,
-        range: "Sheet1!A:H",
-        valueInputOption: "RAW",
-        resource: {
-          values: [
-            [
-              req.body.employeeId,
-              req.body.name,
-              req.body.role,
-              req.body.employmentType,
-              req.body.status,
-              req.body.checkIn,
-              req.body.checkOut,
-              req.body.workType,
-            ],
-          ],
-        },
-      });
-      res.status(201).send("Data added to Google Sheets.");
-    } catch (error) {
-      res.status(500).send(error.message);
-    }
   })
 );
 

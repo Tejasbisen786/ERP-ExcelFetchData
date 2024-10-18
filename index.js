@@ -43,6 +43,19 @@ UserSchema.methods.comparePassword = function (password) {
 
 const User = mongoose.model("User", UserSchema);
 
+const EmployeeSchema = new mongoose.Schema({
+  employeeId: { type: String, required: true, unique: true },
+  name: { type: String, required: true },
+  role: { type: String, required: true },
+  employmentType: { type: String, required: true },
+  status: { type: String, required: true },
+  checkIn: { type: String, required: true },
+  checkOut: { type: String, required: true },
+  workType: { type: String, required: true },
+});
+
+const Employee = mongoose.model("Employee", EmployeeSchema);
+
 // Middleware to authenticate JWT
 function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization;
@@ -61,59 +74,192 @@ function authenticateJWT(req, res, next) {
 }
 
 // Function to read data from a local Excel file and store it in MongoDB
-app.post("/api/read-excel", authenticateJWT, asyncHandler(async (req, res) => {
-    const filePath = req.body.filePath; // Get the file path from the request body
+app.post(
+  "/api/read-excel",
+  authenticateJWT,
+  asyncHandler(async (req, res) => {
+    const filePath = req.body.filePath;
 
     try {
-        // Read the Excel file
-        const workbook = XLSX.readFile(filePath);
-        const sheetName = workbook.SheetNames[0]; // Get the first sheet name
-        const sheetData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]); // Convert sheet to JSON
+      const workbook = XLSX.readFile(filePath);
+      const sheetName = workbook.SheetNames[0];
+      const sheetData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
 
-        // Store data in MongoDB
-        await Employee.insertMany(sheetData); // Save data to Employee collection
+      const formattedData = sheetData.map((item) => ({
+        employeeId: item["Employee ID"],
+        name: item["Name"],
+        role: item["Role"],
+        employmentType: item["Employment Type"],
+        status: item["Status"],
+        checkIn: item["Check-In"],
+        checkOut: item["Check-Out"],
+        workType: item["Work Type"],
+      }));
 
-        res.status(200).json(sheetData); // Send back the data as response
+      const employeeIds = formattedData.map((employee) => employee.employeeId);
+      const duplicateIds = employeeIds.filter(
+        (id, index) => employeeIds.indexOf(id) !== index
+      );
+
+      if (duplicateIds.length > 0) {
+        return res.status(400).json({
+          msg: "Duplicate employee IDs found in the Excel sheet",
+          duplicates: duplicateIds,
+        });
+      }
+
+      let existingEmployee = [];
+      // Check for existing employeeIds in MongoDB
+      for (const employee of formattedData) {
+        existingEmployee = await Employee.findOne({
+          employeeId: employee.employeeId,
+        });
+
+        if (!existingEmployee) {
+          await Employee.create(employee); // Insert if it doesn't exist
+        } else {
+          console.log(
+            `Employee with ID ${employee.employeeId} already exists. Skipping...`
+          );
+        }
+      }
+
+      res
+        .status(200)
+        .json({ msg: "Data inserted successfully", data: formattedData });
     } catch (error) {
-        console.error('Error reading Excel file:', error);
-        res.status(500).send('Error reading Excel file');
+      console.error("Error reading Excel file:", error);
+      res.status(500).send("Error reading Excel file");
     }
-}));
+  })
+);
 
 // Function to write new data to a local Excel file without deleting existing data
-app.post("/api/write-excel", authenticateJWT, asyncHandler(async (req, res) => {
-    const { filePath, employeeData } = req.body; // Get the file path and employee data from the request body
+// app.post(
+//   "/api/write-excel",
+//   authenticateJWT,
+//   asyncHandler(async (req, res) => {
+//     const { filePath, employeeData } = req.body;
+
+//     // Check for duplicate employee IDs in the incoming data
+//     const employeeIds = employeeData.map(employee => employee.employeeId);
+//     const duplicateIds = employeeIds.filter((id, index) => employeeIds.indexOf(id) !== index);
+
+//     if (duplicateIds.length > 0) {
+//       return res.status(400).json({
+//         msg: "Duplicate employee IDs found in the provided data",
+//         duplicates: duplicateIds
+//       });
+//     }
+
+//     try {
+//       let existingData = [];
+//       try {
+//         const workbook = XLSX.readFile(filePath);
+//         const sheetName = workbook.SheetNames[0];
+//         existingData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+//       } catch (error) {
+//         console.log("No existing Excel file found. Creating a new one.");
+//       }
+
+//       const combinedData = [...existingData, ...employeeData];
+
+//       // Update or insert employee data in MongoDB
+//       for (const employee of combinedData) {
+//         await Employee.updateOne(
+//           { employeeId: employee.employeeId },
+//           { $set: employee },
+//           { upsert: true }
+//         );
+//       }
+
+//       // Write combined data to Excel file
+//       const newWorkbook = XLSX.utils.book_new();
+//       const newSheet = XLSX.utils.json_to_sheet(combinedData);
+//       XLSX.utils.book_append_sheet(newWorkbook, newSheet, 'Employees');
+//       XLSX.writeFile(newWorkbook, filePath);
+
+//       res.status(201).send("Data written to Excel file successfully.");
+//     } catch (error) {
+//       console.error("Error writing to Excel file:", error);
+//       res.status(500).send("Error writing to Excel file");
+//     }
+//   })
+// );
+
+app.post(
+  "/api/write-excel",
+  authenticateJWT,
+  asyncHandler(async (req, res) => {
+    const { filePath, employeeData } = req.body;
+
+    // Check for duplicate employee IDs in the incoming data
+    const employeeIds = employeeData.map((employee) => employee.employeeId);
+    const duplicateIds = employeeIds.filter(
+      (id, index) => employeeIds.indexOf(id) !== index
+    );
+
+    if (duplicateIds.length > 0) {
+      return res.status(400).json({
+        msg: "Duplicate employee IDs found in the provided data",
+        duplicates: duplicateIds,
+      });
+    }
 
     try {
-        let existingData = [];
+      let existingData = [];
+      try {
+        const workbook = XLSX.readFile(filePath);
+        const sheetName = workbook.SheetNames[0];
+        existingData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+      } catch (error) {
+        console.log("No existing Excel file found. Creating a new one.");
+      }
 
-        // Check if the file exists and read existing data
-        try {
-            const workbook = XLSX.readFile(filePath);
-            const sheetName = workbook.SheetNames[0]; // Get the first sheet name
-            existingData = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]); // Convert sheet to JSON
-        } catch (error) {
-            console.log('No existing Excel file found. Creating a new one.');
-        }
+      // Fetch existing employee IDs from the database
+      const existingEmployees = await Employee.find({
+        employeeId: { $in: employeeIds },
+      });
+      const existingEmployeeIds = existingEmployees.map(
+        (emp) => emp.employeeId
+      );
 
-        // Combine existing and new employee data
-        const combinedData = [...existingData, ...employeeData];
+      // Filter out duplicates from the employeeData
+      const filteredEmployeeData = employeeData.filter(
+        (employee) => !existingEmployeeIds.includes(employee.employeeId)
+      );
 
-        // Create a new workbook and worksheet with combined data
-        const newWorkbook = XLSX.utils.book_new();
-        const newWorksheet = XLSX.utils.json_to_sheet(combinedData); // Convert combined JSON to worksheet
+      if (filteredEmployeeData.length === 0) {
+        return res.status(400).json({
+          msg: "All employee IDs already exist in the database.",
+        });
+      }
 
-        XLSX.utils.book_append_sheet(newWorkbook, newWorksheet, "Employees"); // Append worksheet to workbook
+      // Update or insert filtered employee data in MongoDB
+      for (const employee of filteredEmployeeData) {
+        await Employee.updateOne(
+          { employeeId: employee.employeeId },
+          { $set: employee },
+          { upsert: true }
+        );
+      }
 
-        // Write to the specified Excel file
-        XLSX.writeFile(newWorkbook, filePath);
+      // Combine existing and new data for the Excel file
+      const combinedData = [...existingData, ...filteredEmployeeData];
 
-        res.status(201).send("Data written to Excel file successfully.");
+      // Write combined data to Excel file
+      const newWorkbook = XLSX.utils.book_new();
+      const newSheet = XLSX.utils.json_to_sheet(combinedData);
+      XLSX.utils.book_append_sheet(newWorkbook, newSheet, "Employees");
+      XLSX.writeFile(newWorkbook, filePath);
+
+      res.status(201).send("Data written to Excel file successfully.");
     } catch (error) {
-        console.error('Error writing to Excel file:', error);
-        res.status(500).send('Error writing to Excel file');
+      console.error("Error writing to Excel file:", error);
+      res.status(500).send("Error writing to Excel file");
     }
-}));
+  })
+);
 
 // User registration route
 app.post(

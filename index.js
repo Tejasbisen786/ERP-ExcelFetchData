@@ -6,6 +6,7 @@ const dotenv = require("dotenv");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const asyncHandler = require("express-async-handler");
+const { google } = require("googleapis");
 
 dotenv.config();
 
@@ -13,6 +14,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// MongoDB connection
 mongoose
   .connect(process.env.MONGODB_URI, {
     useNewUrlParser: true,
@@ -27,12 +29,14 @@ const UserSchema = new mongoose.Schema({
   password: { type: String, required: true },
 });
 
+// Hash password before saving
 UserSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
   this.password = await bcrypt.hash(this.password, 10);
   next();
 });
 
+// Compare passwords
 UserSchema.methods.comparePassword = function (password) {
   return bcrypt.compare(password, this.password);
 };
@@ -57,15 +61,9 @@ const Employee = mongoose.model("Employee", EmployeeSchema);
 function authenticateJWT(req, res, next) {
   const authHeader = req.headers.authorization;
 
-  console.log(authHeader);
-
   if (authHeader && authHeader.startsWith("Bearer ")) {
     const token = authHeader.split(" ")[1];
-    console.log(token);
-
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-      console.log(token);
-
       if (err) return res.sendStatus(403); // Forbidden
 
       req.user = user; // Attach user info to request
@@ -74,6 +72,32 @@ function authenticateJWT(req, res, next) {
   } else {
     res.sendStatus(401); // Unauthorized
   }
+}
+
+// Function to authenticate and get OAuth2 client for Google Sheets API
+function authorize() {
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } =
+    process.env;
+
+  const oAuth2Client = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+
+  // Load previously stored token or request new authorization
+  let token;
+
+  try {
+    token = process.env.GOOGLE_TOKEN; // Assuming you store your token in the environment variable as well
+    if (!token || token === "{}") throw new Error("Token not found"); // Check if token is missing or empty
+    oAuth2Client.setCredentials(JSON.parse(token));
+  } catch (error) {
+    console.error("Token not found:", error);
+    throw new Error("Authorization required");
+  }
+
+  return oAuth2Client;
 }
 
 // User registration route
@@ -107,6 +131,7 @@ app.post(
       return res.status(401).send("Invalid credentials.");
     }
 
+    // Generate JWT token for authenticated user
     const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, {
       expiresIn: "1h",
     });
@@ -115,15 +140,59 @@ app.post(
   })
 );
 
+// Google OAuth authorization route
+app.get("/api/auth/google", (req, res) => {
+  const { GOOGLE_CLIENT_ID, GOOGLE_REDIRECT_URI } = process.env;
+
+  const oAuth2Client = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    "",
+    GOOGLE_REDIRECT_URI
+  );
+
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: "offline",
+    scope: [
+      "https://www.googleapis.com/auth/spreadsheets", // Scope for Google Sheets
+    ],
+  });
+
+  res.redirect(authUrl);
+});
+
+// Google OAuth callback route
+app.get("/api/auth/google/callback", async (req, res) => {
+  const { code } = req.query;
+
+  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI } =
+    process.env;
+
+  const oAuth2Client = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
+
+  try {
+    const { tokens } = await oAuth2Client.getToken(code);
+
+    // Save the token in an environment variable or a database for future use
+    process.env.GOOGLE_TOKEN = JSON.stringify(tokens); // For testing purposes; consider using a more secure storage solution
+
+    res.send("Authorization successful! You can now use the API.");
+  } catch (error) {
+    console.error("Error during OAuth callback:", error);
+    res.status(500).send("Failed to retrieve access token");
+  }
+});
+
+// Get employees from Google Sheets and store in MongoDB
 app.get(
   "/api/employees",
   authenticateJWT,
   asyncHandler(async (req, res) => {
-    const { google } = require("googleapis");
-    const sheets = google.sheets({
-      version: "v4",
-      auth: process.env.GOOGLE_API_KEY,
-    });
+    const auth = authorize(); // Get authenticated client for Google Sheets API
+    const sheets = google.sheets({ version: "v4", auth });
 
     try {
       const response = await sheets.spreadsheets.values.get({
@@ -164,13 +233,10 @@ app.post(
   "/api/employees",
   authenticateJWT,
   asyncHandler(async (req, res) => {
-    const { google } = require("googleapis");
-    const sheets = google.sheets({
-      version: "v4",
-      auth: process.env.GOOGLE_API_KEY,
-    });
-
     try {
+      const auth = authorize(); // Get authenticated client for Google Sheets API
+      const sheets = google.sheets({ version: "v4", auth });
+
       await sheets.spreadsheets.values.append({
         spreadsheetId: process.env.SPREADSHEET_ID,
         range: "Sheet1!A:H",
@@ -192,6 +258,7 @@ app.post(
       });
       res.status(201).send("Data added to Google Sheets.");
     } catch (error) {
+      console.error("Error adding data to Google Sheets:", error);
       res.status(500).send(error.message);
     }
   })
